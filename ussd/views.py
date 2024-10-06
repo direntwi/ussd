@@ -16,7 +16,7 @@ def index(request):
         response = ""
 
         if text == "":
-            response = "CON What would you want to check \n"
+            response = f"CON {service_code}: What would you want to check \n"
             # response .= "1. My Account \n"
             response += "1. My Phone Number"
 
