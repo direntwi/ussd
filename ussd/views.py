@@ -1,44 +1,149 @@
+from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.http import HttpResponse
-
-
 import json
 
 
 @csrf_exempt
-def index(request):
-    if request.method == "POST":
-        try:
-            # Parse the JSON data from the request body
-            data = json.loads(request.body)
-            print("POST Data (JSON):", data)
+def debug_request_view(request):
+    # Extracting request details
+    request_details = {
+        "method": request.method,
+        "headers": dict(request.headers),
+        "GET_params": request.GET.dict(),
+        "POST_params": request.POST.dict(),
+        "body": request.body.decode("utf-8"),
+    }
 
-            # Extract parameters from the JSON data
-            session_id = data.get("sessionId")
-            service_code = data.get("serviceCode")
-            phone_number = data.get("phoneNumber")
-            text = data.get("text")
+    return JsonResponse(request_details)
 
-            print(
-                f"Session ID: {session_id}, Service Code: {service_code}, Phone Number: {phone_number}, Text: {text}"
-            )
 
-            response = ""
+# Optional: Define mapping dictionaries for cleaner code
+FEELING_OPTIONS = {"1": "Fine", "2": "Frisky", "3": "Not well"}
 
-            if text == "":
-                response = f"CON {service_code}: What would you want to check \n"
-                response += "1. My Phone Number"
+REASON_OPTIONS = {"1": "Money", "2": "Relationships", "3": "Health"}
 
-            elif text == "1":
-                response = f"END My Phone number is {phone_number}"
+sessions = {}
 
-            print("Response:", response)
 
-            return HttpResponse(response, content_type="text/plain")
+@csrf_exempt
+def ussd_handler(request):  # works so I'm using this
+    if request.method != "POST":
+        return JsonResponse(
+            {"error": "Invalid request method. POST required."}, status=405
+        )
 
-        except json.JSONDecodeError:
-            print("Invalid JSON received.")
-            return HttpResponse("Invalid JSON", status=400)
+    try:
+        # Parse the incoming JSON request body
+        request_data = json.loads(request.body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return JsonResponse({"Invalid JSON"}, status=400)
 
-    # If not a POST request, return a 405 Method Not Allowed response
-    return HttpResponse("Invalid request method", status=405)
+    # Extract necessary USSD fields from the request
+    user_id = request_data.get("USERID", "").strip()  # USSD identifier, e.g., NOC1802
+    msisdn = request_data.get("MSISDN", "").strip()  # User's phone number
+    user_data = request_data.get("USERDATA", "").strip()  # User's input
+    msgtype = request_data.get(
+        "MSGTYPE", True
+    )  # True if first request, False otherwise
+    session_id = request_data.get("SESSIONID", "").strip()  # Unique session ID
+
+    # Validate mandatory fields
+    if not all([user_id, msisdn, session_id]):
+        return JsonResponse({"error": "Missing required parameters."}, status=400)
+
+    # Validate MSISDN format (simple check: digits only and length)
+    if not msisdn.isdigit() or len(msisdn) < 10:
+        return JsonResponse({"error": "Invalid MSISDN format."}, status=400)
+
+    # Initialize response dictionary
+    response_data = {
+        "USERID": user_id,
+        "MSISDN": msisdn,
+        "MSGTYPE": True,  # Will be updated based on the flow
+        "MSG": "",  # To be set based on user input
+    }
+
+    # Retrieve existing session data or initialize a new session
+    if session_id not in sessions:
+        sessions[session_id] = {}
+
+    session = sessions[session_id]
+
+    if msgtype:
+        # **New Session**: Present Screen 1
+        response_data["MSG"] = (
+            f"Welcome to {user_id}'s Service.\n"
+            "How are you feeling?\n"
+            "1. Fine\n"
+            "2. Frisky\n"
+            "3. Not well"
+        )
+        response_data["MSGTYPE"] = True  # Session continues
+        # Update session state
+        session["state"] = 1
+    else:
+        # **Existing Session**: Determine current state and respond accordingly
+        current_state = session.get("state", 1)  # Default to Screen 1 if not set
+
+        if current_state == 1:
+            # **Processing Screen 1 Response**: How are you feeling?
+            feeling = FEELING_OPTIONS.get(user_data)
+            if feeling:
+                # Valid input: Proceed to Screen 2
+                session["feeling"] = feeling
+                session["state"] = 2
+                response_data["MSG"] = (
+                    f"Why are you feeling {feeling.lower()}?\n"
+                    "1. Money\n"
+                    "2. Relationships\n"
+                    "3. Health"
+                )
+                response_data["MSGTYPE"] = True  # Session continues
+            else:
+                # **Invalid Input on Screen 1**: Reiterate Screen 1
+                response_data["MSG"] = (
+                    "Invalid option selected. Please try again.\n"
+                    "How are you feeling?\n"
+                    "1. Fine\n"
+                    "2. Frisky\n"
+                    "3. Not well"
+                )
+                response_data["MSGTYPE"] = True  # Session continues
+                # State remains 1
+
+        elif current_state == 2:
+            # **Processing Screen 2 Response**: Why are you feeling {feeling}?
+            reason = REASON_OPTIONS.get(user_data)
+            if reason:
+                # Valid input: End session with summary
+                feeling = session.get("feeling", "N/A")
+                response_data["MSG"] = (
+                    f"You are feeling {feeling.lower()} because of {reason.lower()}."
+                )
+                response_data["MSGTYPE"] = False  # End session
+                # Clean up session data
+                del sessions[session_id]
+            else:
+                # **Invalid Input on Screen 2**: Reiterate Screen 2
+                feeling = session.get("feeling", "N/A")
+                response_data["MSG"] = (
+                    "Invalid option selected. Please try again.\n"
+                    f"Why are you feeling {feeling.lower()}?\n"
+                    "1. Money\n"
+                    "2. Relationships\n"
+                    "3. Health"
+                )
+                response_data["MSGTYPE"] = True  # Session continues
+                # State remains 2
+
+        else:
+            # **Undefined State**: End session with error message
+            response_data["MSG"] = "An error occurred. Please try again later."
+            response_data["MSGTYPE"] = False  # End session
+            # Clean up session data
+            del sessions[session_id]
+
+    # Save the updated session data
+    sessions[session_id] = session
+
+    return JsonResponse(response_data)
