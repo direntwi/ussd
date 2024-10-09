@@ -2,6 +2,12 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
 
+FEELING_OPTIONS = {"1": "Fine", "2": "Frisky", "3": "Not well"}
+
+REASON_OPTIONS = {"1": "Money", "2": "Relationships", "3": "Health"}
+
+sessions = {}
+
 
 @csrf_exempt
 def debug_request_view(request):
@@ -15,14 +21,6 @@ def debug_request_view(request):
     }
 
     return JsonResponse(request_details)
-
-
-# Optional: Define mapping dictionaries for cleaner code
-FEELING_OPTIONS = {"1": "Fine", "2": "Frisky", "3": "Not well"}
-
-REASON_OPTIONS = {"1": "Money", "2": "Relationships", "3": "Health"}
-
-sessions = {}
 
 
 @csrf_exempt
@@ -48,14 +46,6 @@ def ussd_handler(request):
         "MSGTYPE", True
     )  # True if first request, False otherwise
     session_id = request_data.get("SESSIONID", "").strip()  # Unique session ID
-
-    # Validate mandatory fields
-    if not all([user_id, msisdn, session_id]):
-        return JsonResponse({"error": "Missing required parameters."}, status=400)
-
-    # Validate MSISDN format (simple check: digits only and length)
-    if not msisdn.isdigit() or len(msisdn) < 10:
-        return JsonResponse({"error": "Invalid MSISDN format."}, status=400)
 
     # Initialize response dictionary
     response_data = {
@@ -101,65 +91,75 @@ def ussd_handler(request):
         # Initialize state to 1 (Screen 1)
         session["state"] = 1
 
-        # Process each input sequentially
-        for input_value in inputs:
-            current_state = session.get("state", 1)
+        # If no inputs are present after shortcode and extension, present Screen 1
+        if not inputs:
+            response_data["MSG"] = (
+                f"Welcome to {user_id}'s Service.\n"
+                "How are you feeling?\n"
+                "1. Fine\n2. Frisky\n3. Not well"
+            )
+            response_data["MSGTYPE"] = True  # Continue session
+            # State remains 1
+        else:
+            # Process each input sequentially
+            for input_value in inputs:
+                current_state = session.get("state", 1)
 
-            if current_state == 1:
-                # Processing Screen 1 Response: How are you feeling?
-                feeling = FEELING_OPTIONS.get(input_value)
-                if feeling:
-                    # Valid input: Proceed to Screen 2
-                    session["feeling"] = feeling
-                    session["state"] = 2
-                    response_data["MSG"] = (
-                        f"Why are you feeling {feeling.lower()}?\n"
-                        "1. Money\n2. Relationships\n3. Health"
-                    )
-                    response_data["MSGTYPE"] = True  # Continue session
+                if current_state == 1:
+                    # Processing Screen 1 Response: How are you feeling?
+                    feeling = FEELING_OPTIONS.get(input_value)
+                    if feeling:
+                        # Valid input: Proceed to Screen 2
+                        session["feeling"] = feeling
+                        session["state"] = 2
+                        response_data["MSG"] = (
+                            f"Why are you feeling {feeling.lower()}?\n"
+                            "1. Money\n2. Relationships\n3. Health"
+                        )
+                        response_data["MSGTYPE"] = True  # Continue session
+                    else:
+                        # Invalid Input on Screen 1: Reiterate Screen 1
+                        response_data["MSG"] = (
+                            "Invalid option selected. Please try again.\n"
+                            "How are you feeling?\n"
+                            "1. Fine\n2. Frisky\n3. Not well"
+                        )
+                        response_data["MSGTYPE"] = True  # Continue session
+                        # State remains 1
+                        break  # Stop processing further inputs
+
+                elif current_state == 2:
+                    # Processing Screen 2 Response: Why are you feeling {feeling}?
+                    reason = REASON_OPTIONS.get(input_value)
+                    if reason:
+                        # Valid input: End session with summary
+                        feeling = session.get("feeling", "N/A")
+                        response_data["MSG"] = (
+                            f"You are feeling {feeling} because of {reason}."
+                        )
+                        response_data["MSGTYPE"] = False  # Terminate session
+                        # Clean up session data
+                        del sessions[session_id]
+                    else:
+                        # Invalid Input on Screen 2: Reiterate Screen 2
+                        feeling = session.get("feeling", "N/A")
+                        response_data["MSG"] = (
+                            "Invalid option selected. Please try again.\n"
+                            f"Why are you feeling {feeling.lower()}?\n"
+                            "1. Money\n2. Relationships\n3. Health"
+                        )
+                        response_data["MSGTYPE"] = True  # Continue session
+                        # State remains 2
+                    # Whether valid or invalid input, after processing, stop further inputs
+                    break
+
                 else:
-                    # Invalid Input on Screen 1: Reiterate Screen 1
-                    response_data["MSG"] = (
-                        "Invalid option selected. Please try again.\n"
-                        "How are you feeling?\n"
-                        "1. Fine\n2. Frisky\n3. Not well"
-                    )
-                    response_data["MSGTYPE"] = True  # Continue session
-                    # State remains 1
-                    break  # Stop processing further inputs
-
-            elif current_state == 2:
-                # Processing Screen 2 Response: Why are you feeling {feeling}?
-                reason = REASON_OPTIONS.get(input_value)
-                if reason:
-                    # Valid input: End session with summary
-                    feeling = session.get("feeling", "N/A")
-                    response_data["MSG"] = (
-                        f"You are feeling {feeling.lower()} because of {reason.lower()}."
-                    )
+                    # Undefined State: End session with error message
+                    response_data["MSG"] = "An error occurred. Please try again later."
                     response_data["MSGTYPE"] = False  # Terminate session
                     # Clean up session data
                     del sessions[session_id]
-                else:
-                    # Invalid Input on Screen 2: Reiterate Screen 2
-                    feeling = session.get("feeling", "N/A")
-                    response_data["MSG"] = (
-                        "Invalid option selected. Please try again.\n"
-                        f"Why are you feeling {feeling.lower()}?\n"
-                        "1. Money\n2. Relationships\n3. Health"
-                    )
-                    response_data["MSGTYPE"] = True  # Continue session
-                    # State remains 2
-                # Whether valid or invalid input, after processing, stop further inputs
-                break
-
-            else:
-                # Undefined State: End session with error message
-                response_data["MSG"] = "An error occurred. Please try again later."
-                response_data["MSGTYPE"] = False  # Terminate session
-                # Clean up session data
-                del sessions[session_id]
-                break  # Stop processing further inputs
+                    break  # Stop processing further inputs
 
     else:
         # Existing Session: Process the latest input
@@ -196,9 +196,7 @@ def ussd_handler(request):
             if reason:
                 # Valid input: End session with summary
                 feeling = session.get("feeling", "N/A")
-                response_data["MSG"] = (
-                    f"You are feeling {feeling.lower()} because of {reason.lower()}."
-                )
+                response_data["MSG"] = f"You are feeling {feeling} because of {reason}."
                 response_data["MSGTYPE"] = False  # Terminate session
                 # Clean up session data
                 del sessions[session_id]
